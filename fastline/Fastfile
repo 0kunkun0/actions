@@ -12,9 +12,9 @@ platform :ios do
       register_devices(opts)
     end
 
+    # cert 不需要 password
     cert_opts = {
       username: ENV["APPLE_ID"],
-      password: ENV["APPLE_APP_PASSWORD"],
       output_path: "certs",
       development: true,
       force: false
@@ -22,6 +22,7 @@ platform :ios do
     cert_opts[:team_id] = team unless team.empty?
     cert(cert_opts)
 
+    # sigh 需要 password
     sigh_opts = {
       username: ENV["APPLE_ID"],
       password: ENV["APPLE_APP_PASSWORD"],
