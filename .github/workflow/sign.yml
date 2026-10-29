@@ -1,0 +1,28 @@
+name: Sign IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sign:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zsign
+        run: |
+          brew install openssl
+          git clone https://github.com/zhlynn/zsign.git
+          cd zsign && make -j$(sysctl -n hw.ncpu)
+
+      - name: Sign IPA
+        run: |
+          ./zsign/zsign -k certs/key.pem -c certs/cert.pem \
+            -p 123456 -o signed.ipa ipa/1.ipa || \
+          ./zsign/zsign -o signed.ipa ipa/1.ipa   # 无证书伪签
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-ipa
+          path: signed.ipa
