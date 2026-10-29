@@ -1,0 +1,36 @@
+default_platform(:ios)
+platform :ios do
+  lane :prepare_signing do
+    team = ENV["APPLE_TEAM_ID"].to_s.strip
+
+    if ENV["DEVICE_UDID"] && !ENV["DEVICE_UDID"].empty?
+      opts = {
+        devices: { "my-iphone" => ENV["DEVICE_UDID"] },
+        username: ENV["APPLE_ID"]
+      }
+      opts[:team_id] = team unless team.empty?
+      register_devices(opts)
+    end
+
+    cert_opts = {
+      username: ENV["APPLE_ID"],
+      password: ENV["APPLE_APP_PASSWORD"],
+      output_path: "certs",
+      development: true,
+      force: false
+    }
+    cert_opts[:team_id] = team unless team.empty?
+    cert(cert_opts)
+
+    sigh_opts = {
+      username: ENV["APPLE_ID"],
+      password: ENV["APPLE_APP_PASSWORD"],
+      development: true,
+      adhoc: false,
+      output_path: "certs",
+      force: true
+    }
+    sigh_opts[:team_id] = team unless team.empty?
+    sigh(sigh_opts)
+  end
+end
