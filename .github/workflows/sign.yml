@@ -38,44 +38,6 @@ jobs:
           ls -lh 1.ipa
           file 1.ipa
 
-      - name: Write Fastfile
-        run: |
-          mkdir -p fastlane
-          cat > fastlane/Fastfile <<'EOF'
-          default_platform(:ios)
-          platform :ios do
-            lane :prepare_signing do
-              if ENV["DEVICE_UDID"] && !ENV["DEVICE_UDID"].empty?
-                register_devices(
-                  devices: { "my-iphone" => ENV["DEVICE_UDID"] },
-                  username: ENV["APPLE_ID"],
-                  team_id: ENV["APPLE_TEAM_ID"]
-                )
-              end
-
-              cert(
-                username: ENV["APPLE_ID"],
-                password: ENV["APPLE_APP_PASSWORD"],
-                team_id: ENV["APPLE_TEAM_ID"],
-                output_path: "certs",
-                development: true,
-                force: false
-              )
-
-              sigh(
-                username: ENV["APPLE_ID"],
-                password: ENV["APPLE_APP_PASSWORD"],
-                team_id: ENV["APPLE_TEAM_ID"],
-                development: true,
-                adhoc: false,
-                output_path: "certs",
-                force: true,
-                ignore_profiles_with_different_name_with_prefix: false
-              )
-            end
-          end
-          EOF
-
       - name: Fetch free cert & provisioning profile
         run: |
           fastlane prepare_signing
