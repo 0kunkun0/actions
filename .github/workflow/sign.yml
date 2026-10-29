@@ -1,28 +1,157 @@
-name: Sign IPA
+name: Sign IPA (Free Personal Team)
 
 on:
   workflow_dispatch:
+  release:
+    types: [published]
 
 jobs:
   sign:
     runs-on: macos-latest
+    timeout-minutes: 40
+
+    env:
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      DEVICE_UDID: ${{ secrets.DEVICE_UDID }}
+      FASTLANE_USER: ${{ secrets.APPLE_ID }}
+      FASTLANE_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      FASTLANE_SKIP_UPDATE_CHECK: "1"
+      FASTLANE_HIDE_CHANGELOG: "1"
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout (不需要 LFS)
+        uses: actions/checkout@v4
+        with:
+          lfs: false
 
-      - name: Install zsign
-        run: |
-          brew install openssl
-          git clone https://github.com/zhlynn/zsign.git
-          cd zsign && make -j$(sysctl -n hw.ncpu)
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
 
-      - name: Sign IPA
+      - name: Install fastlane
+        run: brew install fastlane
+
+      - name: Download IPA from release (v1)
         run: |
-          ./zsign/zsign -k certs/key.pem -c certs/cert.pem \
-            -p 123456 -o signed.ipa ipa/1.ipa || \
-          ./zsign/zsign -o signed.ipa ipa/1.ipa   # 无证书伪签
+          curl -fL -o 1.ipa "https://github.com/${{ github.repository }}/releases/download/v1/1.ipa"
+          ls -lh 1.ipa
+          file 1.ipa
+
+      - name: Write Fastfile
+        run: |
+          mkdir -p fastlane
+          cat > fastlane/Fastfile <<'EOF'
+          default_platform(:ios)
+          platform :ios do
+            lane :prepare_signing do
+              if ENV["DEVICE_UDID"] && !ENV["DEVICE_UDID"].empty?
+                register_devices(
+                  devices: { "my-iphone" => ENV["DEVICE_UDID"] },
+                  username: ENV["APPLE_ID"],
+                  team_id: ENV["APPLE_TEAM_ID"]
+                )
+              end
+
+              cert(
+                username: ENV["APPLE_ID"],
+                password: ENV["APPLE_APP_PASSWORD"],
+                team_id: ENV["APPLE_TEAM_ID"],
+                output_path: "certs",
+                development: true,
+                force: false
+              )
+
+              sigh(
+                username: ENV["APPLE_ID"],
+                password: ENV["APPLE_APP_PASSWORD"],
+                team_id: ENV["APPLE_TEAM_ID"],
+                development: true,
+                adhoc: false,
+                output_path: "certs",
+                force: true,
+                ignore_profiles_with_different_name_with_prefix: false
+              )
+            end
+          end
+          EOF
+
+      - name: Fetch free cert & provisioning profile
+        run: |
+          fastlane prepare_signing
+          echo "--- certs ---"
+          ls -la certs
+
+      - name: Unpack IPA
+        run: |
+          mkdir -p work
+          unzip -q 1.ipa -d work
+          APP_PATH=$(find work/Payload -maxdepth 1 -name "*.app" | head -n1)
+          if [ -z "$APP_PATH" ]; then echo "No .app found"; exit 1; fi
+          echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
+          echo "App: $APP_PATH"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_PATH/Info.plist" || true
+
+      - name: Prepare keychain & import cert
+        run: |
+          P12=$(find certs -name "*.p12" | head -n1)
+          if [ -z "$P12" ]; then echo "No p12"; exit 1; fi
+          security create-keychain -p actions build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p actions build.keychain
+          security default-keychain -s build.keychain
+          security list-keychains -d user -s build.keychain $(security list-keychains -d user | tr -d '"')
+          security import "$P12" -k build.keychain -P "" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions build.keychain
+          security find-identity -v -p codesigning build.keychain
+
+      - name: Embed provisioning profile
+        run: |
+          PROFILE=$(find certs -name "*.mobileprovision" | head -n1)
+          if [ -z "$PROFILE" ]; then echo "No profile"; exit 1; fi
+          cp "$PROFILE" "$APP_PATH/embedded.mobileprovision"
+          # 打印 profile 里绑定的 UDID，便于核对
+          security cms -D -i "$PROFILE" > /tmp/profile.plist
+          /usr/libexec/PlistBuddy -c "Print :ProvisionedDevices" /tmp/profile.plist || echo "WARN: no ProvisionedDevices"
+
+      - name: Re-sign frameworks & app
+        run: |
+          IDENTITY=$(security find-identity -v -p codesigning build.keychain | awk -F'"' '/Apple Development/{print $2; exit}')
+          if [ -z "$IDENTITY" ]; then echo "No signing identity"; exit 1; fi
+          echo "Using identity: $IDENTITY"
+
+          if [ -d "$APP_PATH/Frameworks" ]; then
+            find "$APP_PATH/Frameworks" -type d -name "*.framework" | while read fw; do
+              codesign -f -s "$IDENTITY" --timestamp=none "$fw"
+            done
+            find "$APP_PATH/Frameworks" -type f \( -name "*.dylib" -o -name "*.so" \) | while read lib; do
+              codesign -f -s "$IDENTITY" --timestamp=none "$lib"
+            done
+          fi
+
+          # 若有 PlugIns / Watch，也签一下
+          for d in PlugIns Watch; do
+            if [ -d "$APP_PATH/$d" ]; then
+              find "$APP_PATH/$d" -type d -name "*.appex" -o -type d -name "*.app" | while read sub; do
+                codesign -f -s "$IDENTITY" --timestamp=none "$sub"
+              done
+            fi
+          done
+
+          codesign -f -s "$IDENTITY" --timestamp=none "$APP_PATH"
+          codesign --verify --deep --strict "$APP_PATH" || true
+
+      - name: Repack IPA
+        run: |
+          mkdir -p out
+          cd work
+          zip -qry ../out/1-signed.ipa Payload
+          cd ..
+          ls -lh out/1-signed.ipa
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: signed-ipa
-          path: signed.ipa
+          path: out/1-signed.ipa
+          retention-days: 3
